@@ -79,6 +79,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchQuery = m.searchInput.Value()
 				m.searching = false
 				m.performSearch()
+				m.updateContent()
 				return m, nil
 			case "esc":
 				m.searching = false
@@ -110,9 +111,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, textinput.Blink
 		case "n":
 			m.findNext()
+			m.updateContent()
 			return m, nil
 		case "N", "p":
 			m.findPrev()
+			m.updateContent()
 			return m, nil
 		}
 
@@ -141,7 +144,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) updateContent() {
-	m.viewport.SetContent(m.processor.HighlightAll(m.searchQuery, m.matchIndex, m.matches))
+	m.viewport.SetContent(m.processor.HighlightAll(m.searchQuery, m.matchIndex))
 }
 
 func (m *Model) performSearch() {

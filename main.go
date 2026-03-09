@@ -49,7 +49,7 @@ func main() {
 	}
 
 	if *noInteractive {
-		fmt.Print(p.HighlightAll("", -1, nil))
+		fmt.Print(p.HighlightAll("", -1))
 		return
 	}
 

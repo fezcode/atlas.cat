@@ -37,7 +37,6 @@ var (
 	hexASCIIStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#555555"))
 
-	// Style for search matches
 	searchMatchStyle = lipgloss.NewStyle().
 				Background(lipgloss.Color("#D4AF37")).
 				Foreground(lipgloss.Color("#000000"))
@@ -55,7 +54,7 @@ type Processor struct {
 	WrapLines       bool
 	ViewportWidth   int
 
-	lines []string // Plain text lines
+	lines []string
 }
 
 func NewProcessor(path string, showLines, hexMode, wrap bool) (*Processor, error) {
@@ -77,21 +76,17 @@ func NewProcessor(path string, showLines, hexMode, wrap bool) (*Processor, error
 		p.lines = append(p.lines, scanner.Text())
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	return p, nil
+	return p, scanner.Err()
 }
 
 func (p *Processor) GetPlain() string {
 	return strings.Join(p.lines, "\n")
 }
 
-func (p *Processor) HighlightAll(searchQuery string, matchIndex int, matches []int) string {
+func (p *Processor) HighlightAll(searchQuery string, matchIndex int) string {
 	content := p.GetPlain()
 	if p.HexMode {
-		return p.renderHexWithSearch(searchQuery, matchIndex, matches)
+		return p.renderHexWithSearch(searchQuery, matchIndex)
 	}
 
 	lexer := lexers.Get(p.Path)
@@ -107,19 +102,13 @@ func (p *Processor) HighlightAll(searchQuery string, matchIndex int, matches []i
 	formatter := formatters.Get("terminal256")
 
 	iterator, _ := lexer.Tokenise(nil, content)
-	
 	var buf bytes.Buffer
 	formatter.Format(&buf, style, iterator)
 
 	highlighted := buf.String()
-	
-	// Since sophisticated ANSI-aware search highlighting is complex, 
-	// we'll use a simpler approach: 
-	// If search query is present, we wrap matches in the final string 
-	// BUT we only do it if the match doesn't contain ANSI codes.
-	// For a senior developer tool, we'll implement a basic but working version.
+
 	if searchQuery != "" {
-		highlighted = p.applySearchHighlight(highlighted, searchQuery, matchIndex, matches)
+		highlighted = p.applySearchHighlight(highlighted, searchQuery, matchIndex)
 	}
 
 	lines := strings.Split(highlighted, "\n")
@@ -130,8 +119,6 @@ func (p *Processor) HighlightAll(searchQuery string, matchIndex int, matches []i
 		if i == len(lines)-1 && line == "" {
 			break
 		}
-
-		formattedLine := line
 		prefix := ""
 		if p.ShowLineNumbers {
 			prefix = lineNumStyle.Render(fmt.Sprintf("%*d", width, i+1))
@@ -143,25 +130,22 @@ func (p *Processor) HighlightAll(searchQuery string, matchIndex int, matches []i
 				contentWidth -= (width + 1)
 			}
 			if contentWidth > 0 {
-				wrapped := lipgloss.NewStyle().Width(contentWidth).Render(formattedLine)
+				wrapped := lipgloss.NewStyle().Width(contentWidth).Render(line)
 				subLines := strings.Split(wrapped, "\n")
 				for j, sl := range subLines {
 					if j == 0 {
 						finalLines = append(finalLines, prefix+sl)
 					} else {
-						indent := strings.Repeat(" ", width+1)
-						finalLines = append(finalLines, indent+sl)
+						finalLines = append(finalLines, strings.Repeat(" ", width+1)+sl)
 					}
 				}
 				continue
 			}
 		}
-
-		finalLines = append(finalLines, prefix+formattedLine)
+		finalLines = append(finalLines, prefix+line)
 	}
 
 	highlighted = strings.Join(finalLines, "\n")
-
 	if !strings.HasSuffix(highlighted, "\n") {
 		highlighted += "\n"
 	}
@@ -169,33 +153,26 @@ func (p *Processor) HighlightAll(searchQuery string, matchIndex int, matches []i
 	return highlighted
 }
 
-func (p *Processor) applySearchHighlight(highlighted, query string, matchIndex int, matches []int) string {
-	// This is a simplified search highlight that works for non-overlapping ANSI cases.
-	// In a real-world scenario, we'd use the Tokenizer injection method.
-	// For now, let's use a placeholder-based replacement to avoid breaking existing ANSI.
-	
-	// We'll highlight the CURRENT match with a different style if possible.
-	// To keep it simple and bug-free, we'll just use strings.Replace
-	// but we must be careful not to replace inside ANSI codes.
-	
-	// We'll use a regex-free way to find parts of the string that aren't ANSI codes.
+func (p *Processor) applySearchHighlight(highlighted, query string, matchIndex int) string {
 	var result strings.Builder
 	cursor := 0
+	matchCounter := 0
+
 	for {
-		// Find next ANSI escape
 		start := strings.Index(highlighted[cursor:], "\x1b[")
 		if start == -1 {
-			// No more ANSI, process the rest
-			result.WriteString(p.highlightPlainPart(highlighted[cursor:], query))
+			res, count := p.highlightPlainPart(highlighted[cursor:], query, matchIndex, matchCounter)
+			result.WriteString(res)
+			matchCounter = count
 			break
 		}
-		
+
 		start += cursor
-		// Process plain text before ANSI
-		result.WriteString(p.highlightPlainPart(highlighted[cursor:start], query))
-		
-		// Find end of ANSI escape
-		end := strings.IndexAny(highlighted[start:], "mABCDHJKfhnpsu") // Common ANSI terminators
+		res, count := p.highlightPlainPart(highlighted[cursor:start], query, matchIndex, matchCounter)
+		result.WriteString(res)
+		matchCounter = count
+
+		end := strings.IndexAny(highlighted[start:], "mABCDHJKfhnpsu")
 		if end == -1 {
 			result.WriteString(highlighted[start:])
 			break
@@ -204,40 +181,45 @@ func (p *Processor) applySearchHighlight(highlighted, query string, matchIndex i
 		result.WriteString(highlighted[start:end])
 		cursor = end
 	}
-	
+
 	return result.String()
 }
 
-func (p *Processor) highlightPlainPart(text, query string) string {
+func (p *Processor) highlightPlainPart(text, query string, targetIdx, currentCount int) (string, int) {
 	if query == "" || text == "" {
-		return text
+		return text, currentCount
 	}
-	
+
 	lowerText := strings.ToLower(text)
 	lowerQuery := strings.ToLower(query)
-	
+
 	var result strings.Builder
 	cursor := 0
+	count := currentCount
 	for {
 		idx := strings.Index(lowerText[cursor:], lowerQuery)
 		if idx == -1 {
 			result.WriteString(text[cursor:])
 			break
 		}
-		
+
 		idx += cursor
 		result.WriteString(text[cursor:idx])
-		
-		// Wrap match in style
+
 		matchText := text[idx : idx+len(query)]
-		result.WriteString(searchMatchStyle.Render(matchText))
-		
+		style := searchMatchStyle
+		if count == targetIdx {
+			style = currentMatchStyle
+		}
+		result.WriteString(style.Render(matchText))
+
+		count++
 		cursor = idx + len(query)
 	}
-	return result.String()
+	return result.String(), count
 }
 
-func (p *Processor) renderHexWithSearch(query string, matchIndex int, matches []int) string {
+func (p *Processor) renderHexWithSearch(query string, matchIndex int) string {
 	content := p.GetPlain()
 	var sb strings.Builder
 	d := hex.Dumper(&sb)
@@ -246,34 +228,30 @@ func (p *Processor) renderHexWithSearch(query string, matchIndex int, matches []
 
 	lines := strings.Split(sb.String(), "\n")
 	var styledSB strings.Builder
-	
+	matchCounter := 0
+
 	for _, line := range lines {
 		if line == "" {
 			continue
 		}
-		
+
 		parts := strings.SplitN(line, "  ", 3)
 		if len(parts) >= 1 {
 			styledSB.WriteString(hexOffsetStyle.Render(parts[0]))
 		}
 		if len(parts) >= 2 {
-			bytesPart := parts[1]
-			if query != "" {
-				bytesPart = p.highlightPlainPart(bytesPart, query)
-			}
-			styledSB.WriteString(hexByteStyle.Render(bytesPart))
+			res, count := p.highlightPlainPart(parts[1], query, matchIndex, matchCounter)
+			styledSB.WriteString(hexByteStyle.Render(res))
+			matchCounter = count
 		}
 		if len(parts) >= 3 {
 			styledSB.WriteString("  ")
-			asciiPart := parts[2]
-			if query != "" {
-				asciiPart = p.highlightPlainPart(asciiPart, query)
-			}
-			styledSB.WriteString(hexASCIIStyle.Render("|" + asciiPart + "|"))
+			res, count := p.highlightPlainPart(parts[2], query, matchIndex, matchCounter)
+			styledSB.WriteString(hexASCIIStyle.Render("|"+res+"|"))
+			matchCounter = count
 		}
 		styledSB.WriteRune('\n')
 	}
-	styledSB.WriteString("\n")
-	styledSB.WriteString(eofStyle.Render("EOF"))
+	styledSB.WriteString("\n" + eofStyle.Render("EOF"))
 	return styledSB.String()
 }
