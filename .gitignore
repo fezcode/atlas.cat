@@ -1,0 +1,12 @@
+# Binaries
+/build/
+/atlas.cat.exe
+/atlas.cat
+
+# IDEs
+.idea/
+.vscode/
+
+# Dependencies
+vendor/
+go.sum
