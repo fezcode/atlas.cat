@@ -35,6 +35,12 @@ var (
 			Padding(0, 1).
 			Bold(true)
 
+	errorStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(lipgloss.Color("#AA0000")).
+			Padding(0, 1).
+			Bold(true)
+
 	selectionStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("#FFFFFF")).
 			Foreground(lipgloss.Color("#000000"))
@@ -63,6 +69,9 @@ type Model struct {
 	selecting    bool
 	selectStartY int
 	selectStartX int
+
+	// Transient status message (e.g. errors)
+	errorMsg string
 }
 
 func NewModel(p *viewer.Processor) Model {
@@ -111,12 +120,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "q", "esc":
+		case "esc":
+			if m.selecting {
+				m.selecting = false
+				m.updateContent()
+				return m, nil
+			}
+			return m, tea.Quit
+		case "q":
 			return m, tea.Quit
 		case "ctrl+c":
 			if m.selecting {
 				m.copySelection()
 				m.selecting = false
+				m.updateContent()
 				return m, nil
 			}
 			return m, tea.Quit
@@ -136,6 +153,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.searching = true
 			m.searchInput.Focus()
 			return m, textinput.Blink
+		case "ctrl+r":
+			if err := m.processor.Reload(); err != nil {
+				m.errorMsg = fmt.Sprintf("Refresh failed: %v", err)
+				return m, nil
+			}
+			m.errorMsg = ""
+			if m.cursorY >= m.processor.LinesCount() {
+				m.cursorY = max(0, m.processor.LinesCount()-1)
+			}
+			if m.searchQuery != "" {
+				m.performSearch()
+			}
+			m.updateContent()
+			return m, nil
 		case "n":
 			m.findNext()
 			m.updateContent()
@@ -370,8 +401,12 @@ func (m *Model) copySelection() {
 func (m *Model) updateContent() {
 	var content string
 	if m.selecting {
+		m.processor.CursorY = -1
+		m.processor.CursorX = -1
 		content = m.renderSelection()
 	} else {
+		m.processor.CursorY = m.cursorY
+		m.processor.CursorX = m.cursorX
 		content = m.processor.HighlightAll(m.searchQuery, m.matchIndex)
 	}
 	m.viewport.SetContent(content)
@@ -577,7 +612,9 @@ func (m Model) footerView() string {
 	}
 
 	status := ""
-	if m.selecting {
+	if m.errorMsg != "" {
+		status = errorStyle.Render(m.errorMsg) + " "
+	} else if m.selecting {
 		status = selectionStyle.Render(" SELECTING ") + " "
 	}
 
@@ -587,6 +624,7 @@ func (m Model) footerView() string {
 		helpKeyStyle.Render(" ^C "), helpDescStyle.Render("copy "),
 		helpKeyStyle.Render(" l "), helpDescStyle.Render("lines "),
 		helpKeyStyle.Render(" / "), helpDescStyle.Render("search "),
+		helpKeyStyle.Render(" ^R "), helpDescStyle.Render("refresh "),
 	)
 
 	gap := max(0, m.viewport.Width-lipgloss.Width(help)-lipgloss.Width(percent)-lipgloss.Width(matchInfo)-lipgloss.Width(status)-2)

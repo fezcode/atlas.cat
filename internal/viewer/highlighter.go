@@ -45,6 +45,10 @@ var (
 				Background(lipgloss.Color("#FFFFFF")).
 				Foreground(lipgloss.Color("#000000")).
 				Bold(true)
+
+	cursorOverlayStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("#D4AF37")).
+				Foreground(lipgloss.Color("#000000"))
 )
 
 type Processor struct {
@@ -54,29 +58,46 @@ type Processor struct {
 	WrapLines       bool
 	ViewportWidth   int
 
+	// CursorY/CursorX < 0 disable cursor overlay.
+	CursorY int
+	CursorX int
+
 	lines []string
 }
 
 func NewProcessor(path string, showLines, hexMode, wrap bool) (*Processor, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
 	p := &Processor{
 		Path:            path,
 		ShowLineNumbers: showLines,
 		HexMode:         hexMode,
 		WrapLines:       wrap,
+		CursorY:         -1,
+		CursorX:         -1,
 	}
 
+	if err := p.Reload(); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (p *Processor) Reload() error {
+	f, err := os.Open(p.Path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	var newLines []string
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		p.lines = append(p.lines, scanner.Text())
+		newLines = append(newLines, scanner.Text())
 	}
-
-	return p, scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	p.lines = newLines
+	return nil
 }
 
 func (p *Processor) GetPlain() string {
@@ -123,6 +144,9 @@ func (p *Processor) HighlightAll(searchQuery string, matchIndex int) string {
 		if i == len(lines)-1 && line == "" {
 			break
 		}
+		if i == p.CursorY && p.CursorX >= 0 {
+			line = overlayCursor(line, p.CursorX)
+		}
 		prefix := ""
 		if p.ShowLineNumbers {
 			prefix = lineNumStyle.Render(fmt.Sprintf("%*d", width, i+1))
@@ -155,6 +179,53 @@ func (p *Processor) HighlightAll(searchQuery string, matchIndex int) string {
 	}
 	highlighted += eofStyle.Render("EOF")
 	return highlighted
+}
+
+// overlayCursor paints a single-cell cursor on an ANSI-styled line at the
+// given plain-text column, skipping over SGR escape sequences.
+func overlayCursor(line string, col int) string {
+	var out strings.Builder
+	plainCol := 0
+	i := 0
+	placed := false
+
+	for i < len(line) {
+		if i+1 < len(line) && line[i] == '\x1b' && line[i+1] == '[' {
+			end := strings.IndexAny(line[i+2:], "mABCDHJKfhnpsu")
+			if end == -1 {
+				out.WriteString(line[i:])
+				i = len(line)
+				continue
+			}
+			end += i + 2 + 1
+			out.WriteString(line[i:end])
+			i = end
+			continue
+		}
+
+		if plainCol == col && !placed {
+			ch := string(line[i])
+			// Terminate any active SGR, render the cursor cell, then let the
+			// next token's SGR re-establish styling for subsequent text.
+			out.WriteString("\x1b[0m")
+			out.WriteString(cursorOverlayStyle.Render(ch))
+			placed = true
+			i++
+			plainCol++
+			continue
+		}
+
+		out.WriteByte(line[i])
+		i++
+		plainCol++
+	}
+
+	if !placed && plainCol == col {
+		out.WriteString("\x1b[0m")
+		out.WriteString(cursorOverlayStyle.Render(" "))
+	}
+
+	return out.String()
 }
 
 func (p *Processor) applySearchHighlight(highlighted, query string, matchIndex int) string {
